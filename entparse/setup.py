@@ -1,4 +1,5 @@
 import setuptools, os
+from Cython.Build import cythonize
 
 def load_requirements(fname):
   lines = list(open(fname))
@@ -8,16 +9,16 @@ def load_requirements(fname):
     lines
   )
 
-REQS = parse_reqs(os.path.join(os.path.dirname(__file__), 'requirements.txt'))
+REQS = load_requirements(os.path.join(os.path.dirname(__file__), 'requirements.txt'))
 
 ARGS = dict(
   name='entparse',
   version='0.0.0',
-  description='',
+  description='fast json entity parser for cython',
   author='Abe Winter ',
   url='https://github.com/abe-winter/entparse',
   license='MIT',
-  packages=setuptools.find_packages('.'),
+  ext_modules=cythonize('entparse.pyx'),
   install_requires=REQS,
 )
 
