@@ -13,9 +13,5 @@ cdef class JEBEntity:
 cdef class JEBList(JEBEntity):
     cdef public int maxwidth
 
-    cpdef __getitem__(self, unsigned int index)
-
 cdef class JEBDict(JEBEntity):
     cdef public list fields
-
-    cpdef __getitem__(self, basestring key)
