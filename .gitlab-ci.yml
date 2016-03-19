@@ -1,6 +1,11 @@
+cache:
+  paths:
+    - env
+
 python2:
     image: python:2
     script:
+        - virtualenv env --system-site-packages && source env/bin/activate
         - cd entparse
         - pip install -e .
         - py.test test/test.py
