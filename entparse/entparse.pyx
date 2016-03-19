@@ -1,8 +1,11 @@
+import json
+
 cdef enum ParserState:
     # note: post_comma and pre_comma can only appear directly above a dict_outer or list_outer
     pre_comma, post_comma
     begin_val
-    top, dict_outer, list_outer, double_quote, single_quote, backslash, dict_key, dict_value, list_value, pre_float, post_float
+    top, dict_outer, list_outer, double_quote, single_quote, backslash, list_value, pre_float, post_float,
+    dict_key, dict_sep
 
 # [ list_outer post_comma ]
 # [ list_outer post_comma "a" pre_comma , post_comma ]
@@ -36,6 +39,21 @@ cdef class ParseOutput:
     def __cinit__(self):
         self.keys = []
         self.values = []
+
+    def tolist(self):
+        "note: this succeeds even for dictionaries"
+        return [
+            json.loads(v.value())
+            for v in self.values
+        ]
+
+    def todict(self):
+        if len(self.keys) != len(self.values):
+            raise TypeError("todict() requires matched keys and values")
+        return {
+            k.value(): json.loads(v.value())
+            for k, v in zip(self.keys, self.values)
+        }
 
 cdef class CharIterator:
     """wrapper for iterating through strings with the ability to rerun a character.
@@ -91,7 +109,7 @@ cdef class JEBExtent:
             return dict
         elif state == list_outer:
             return list
-        elif state in (double_quote, single_quote):
+        elif state in (double_quote, single_quote, dict_key):
             return str
         elif state in (pre_float, post_float):
             # note: I don't think post_float can get here
@@ -137,7 +155,7 @@ cdef class JEBExtent:
                     raise IllegalChar("bad first character for begin_val", i, char_)
                 if len(stack) == 3:
                     if outer_frame is not None:
-                        raise UnexpectedCase("reusing outer frame before clearing it")
+                        raise UnexpectedCase("reusing outer_frame before clearing it")
                     outer_frame = Frame(stack[-1], i)
             elif state == list_outer:
                 if len(stack) == 2 and outer_frame:
@@ -152,39 +170,61 @@ cdef class JEBExtent:
                 elif char_ == ',':
                     stack.append(begin_val)
                 else:
-                    # warning: I think this ends up letting spaces separate list values
                     stack.append(begin_val)
                     citer.rerun()
+                    # todo: only allow this clause in list_beginning case
+                    # raise IllegalChar("unexpected char at list scope", i, char_)
             elif state == dict_outer:
+                if len(stack) == 2 and outer_frame:
+                    # todo: merge this with identical clause in list_outer
+                    output.values.append(JEBExtent(
+                        slice(outer_frame.startpos, i),
+                        JEBExtent.enum2type(outer_frame.state),
+                        string
+                    ))
+                    outer_frame = None
                 if char_ == '}':
                     stack.pop()
+                elif char_ == '"':
+                    stack.append(dict_key)
+                    if len(stack) == 3:
+                        if outer_frame is not None:
+                            raise UnexpectedCase("reusing outer_frame before clear (in dict_key)")
+                        outer_frame = Frame(stack[-1], i+1)
+                elif char_ == ',':
+                    # todo: distinguish between expecting a dict key vs comma
+                    pass
                 else:
-                    raise NotImplementedError
-                    stack.append(begin_val)
-                    citer.rerun()
+                    raise IllegalChar("expected key or , at dict_outer scope", i, char_)
             elif state == pre_comma:
                 raise NotImplementedError
-            elif state == dict_outer:
-                raise NotImplementedError
-            elif state == list_outer:
-                #
-                raise NotImplementedError
-            elif state == double_quote:
+            elif state in (double_quote, dict_key):
                 if char_ == '\\':
                     stack.append(backslash)
                 elif char_ == '"':
                     stack.pop()
+                    if state == dict_key:
+                        if len(stack) == 2 and outer_frame:
+                            output.keys.append(JEBExtent(
+                                slice(outer_frame.startpos, i),
+                                JEBExtent.enum2type(outer_frame.state),
+                                string
+                            ))
+                            outer_frame = None
+                        stack.append(dict_sep)
                 else:
                     pass
             elif state == single_quote:
                 raise NotImplementedError
             elif state == backslash:
                 raise NotImplementedError
-            elif state == dict_key:
-                raise NotImplementedError
-            elif state == dict_value:
-                raise NotImplementedError
+            elif state == dict_sep:
+                if char_ == ':':
+                    stack[-1] = begin_val
+                else:
+                    raise IllegalChar("expected ':' after key in dict scope", i, char_)
             elif state == list_value:
+                # todo(delete): (never set)
                 if char_ == ']':
                     stack.pop()
                     citer.rerun()

@@ -2,17 +2,16 @@ import json, pytest
 import entparse
 
 def test_list_container():
-    test_list = [1, '2', [3]]
-    comparison = [json.loads(v.value()) for v in entparse.JEBExtent.parse(json.dumps(test_list), True).values]
-    assert test_list == comparison
+    val = [1.1, '2', [3]]
+    assert val == entparse.JEBExtent.parse(json.dumps(val), True).tolist()
 
-@pytest.mark.xfail
 def test_dict_container():
-    raise NotImplementedError
-    # {'a':1, 'b':2, 'c':3},
+    # todo: make this list actually a list
+    val = {'a':1, 'b':[1,2], 'c':"x"}
+    assert val == entparse.JEBExtent.parse(json.dumps(val), True).todict()
 
 @pytest.mark.xfail
-def test_parse_extent_unicode():
+def test_parse_unicode():
     raise NotImplementedError
 
 @pytest.mark.xfail
