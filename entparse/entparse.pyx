@@ -80,16 +80,20 @@ cdef class CharIterator:
     """
     cdef unsigned int nextpos
     cdef unsigned int max_nextpos
+    cdef unsigned int strlen
     cdef str string
     cdef unsigned int rerun_count
+    cdef const char* buf
 
     def __cinit__(self, str string):
         self.nextpos = 0
         self.max_nextpos = 0 # for rerun
         self.string = string
         self.rerun_count = 0
+        self.buf = self.string
+        self.strlen = len(self.string)
 
-    def rerun(self):
+    cpdef rerun(self):
         if self.rerun_count >= 1:
             raise RerunError('too many reruns', self.rerun_count)
         if self.nextpos == 0:
@@ -97,19 +101,19 @@ cdef class CharIterator:
         self.nextpos -= 1
         self.rerun_count += 1
 
-    def __nonzero__(self):
-        return self.nextpos < len(self.string)
+    cdef int looping(self):
+        return self.nextpos < self.strlen
 
-    cdef next(self):
+    cdef char nextchar(self):
         self.nextpos += 1
         if self.nextpos > self.max_nextpos:
             self.max_nextpos = self.nextpos
             self.rerun_count = 0
-        return self.string[self.nextpos - 1]
+        return self.buf[self.nextpos - 1]
 
     def __iter__(self):
-        while self:
-            char_ = self.next()
+        while self.looping():
+            char_ = self.nextchar()
             yield self.nextpos - 1, char_
 
 cdef class Stack:
@@ -125,14 +129,14 @@ cdef class Stack:
         else:
             return self.stack[self.n - 1]
 
-    cdef push(self, ParserState state):
-        if self.n >= len(self.stack):
+    cdef void push(self, ParserState state):
+        if self.n >= 20:
             raise FullStack('push')
         else:
             self.stack[self.n] = state
             self.n += 1
 
-    cdef pop(self):
+    cdef void pop(self):
         if self.n > 0:
             self.n -= 1
         else:
@@ -147,6 +151,12 @@ cdef class Stack:
     def tolist(self):
         "this is slow; only use for debugging"
         return [translate_parserstate(self.stack[i]) for i in range(self.n)]
+
+cdef int isspace(char c):
+    return c == ' ' or c == '\t'
+
+cdef int isdigit(char c):
+    return c >= '0' and c <= '9'
 
 cdef class JEBExtent:
     cdef public slice slice
@@ -179,24 +189,30 @@ cdef class JEBExtent:
     def parse(type class_, str string, bint verbose=False, maxdepth=20, maxwidth=100):
         "takes a string representing a collection in json (list or dict). returns ParseOutput"
         # todo: replace this with a static-allocated stack and go dynamic only when needed (and the permit_malloc flag is False)
-        cdef Stack stack = Stack()
+        cdef Stack stack
+        stack = Stack()
         stack.push(top)
         stack.push(begin_val)
         output = ParseOutput()
+        cdef CharIterator citer
         citer = CharIterator(string)
         cdef Frame outer_frame = None
         if verbose:
             print 'parsing %r' % string
-        for i, char_ in citer:
+        cdef unsigned int i
+        cdef char char_
+        while citer.looping():
             # todo: generate this logic from a transition model that can be verified for properties
+            char_ = citer.nextchar()
+            i = citer.nextpos - 1
             if verbose:
-                print i, char_, stack.tolist()
+                print i, chr(char_), stack.tolist()
             if not stack:
                 raise UnexpectedCase("shouldn't get here -- we should reach top state first")
             state = stack.peek()
             if state == top:
                 raise IncompleteParse(i, string[:i], string[i:])
-            elif char_.isspace():
+            elif isspace(char_):
                 pass
             elif state == begin_val:
                 stack.pop()
@@ -210,7 +226,7 @@ cdef class JEBExtent:
                     stack.push(double_quote)
                 elif char_ == "'":
                     stack.push(single_quote)
-                elif char_.isdigit():
+                elif isdigit(char_):
                     stack.push(pre_float)
                 else:
                     raise IllegalChar("bad first character for begin_val", i, char_)
@@ -283,7 +299,7 @@ cdef class JEBExtent:
                 else:
                     raise IllegalChar("expected ':' after key in dict scope", i, char_)
             elif state == pre_float:
-                if char_.isdigit():
+                if isdigit(char_):
                     pass
                 elif char_ == '.':
                     stack.replace(post_float)
@@ -291,7 +307,7 @@ cdef class JEBExtent:
                     stack.pop()
                     citer.rerun()
             elif state == post_float:
-                if char_.isdigit():
+                if isdigit(char_):
                     pass
                 else:
                     stack.pop()

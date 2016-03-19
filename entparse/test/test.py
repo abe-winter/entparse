@@ -30,7 +30,7 @@ def test_char_iterator():
         if i == 1 and len(res) < 2:
             citer.rerun()
         res.append(c)
-    assert res == ['a','b','b','c']
+    assert res == map(ord, 'abbc')
 
     with pytest.raises(entparse.RerunError):
         citer = entparse.CharIterator('abc')
