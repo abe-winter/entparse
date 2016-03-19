@@ -1,8 +1,11 @@
 cdef enum ParserState:
+    # note: post_comma and pre_comma can only appear directly above a dict_outer or list_outer
+    pre_comma, post_comma
+    begin_val
     top, dict_outer, list_outer, double_quote, single_quote, backslash, dict_key, dict_value, list_value, pre_float, post_float
 
-cdef enum NextParse:
-    continue_, rerun_
+# [ list_outer post_comma ]
+# [ list_outer post_comma "a" pre_comma , post_comma ]
 
 class EntparseError(StandardError): pass
 class UnexpectedCase(EntparseError): pass
@@ -10,6 +13,16 @@ class IncompleteParse(EntparseError): pass
 class IncompleteJson(EntparseError): pass
 class IllegalChar(EntparseError): pass
 class RerunError(EntparseError): pass
+class OuterNotCollection(EntparseError): pass
+
+cdef class Frame:
+    ""
+    cdef ParserState state
+    cdef int startpos
+
+    def __cinit__(self, ParserState state, int startpos):
+        self.state = state
+        self.startpos = startpos
 
 cdef class ParseOutput:
     """Stores result of parse.
@@ -17,11 +30,12 @@ cdef class ParseOutput:
     -- for a dict input, keys is a list of JEBExtent for the keys
     For both, values is a list of JEBExtent representing the collection values.
     """
-    cdef list keys
-    cdef list values
+    cdef public list keys
+    cdef public list values
 
-cdef parse(list stack, int i, char char_, str string, ParseOutput output):
-    raise NotImplementedError
+    def __cinit__(self):
+        self.keys = []
+        self.values = []
 
 cdef class CharIterator:
     """wrapper for iterating through strings with the ability to rerun a character.
@@ -61,37 +75,107 @@ cdef class CharIterator:
 cdef class JEBExtent:
     cdef public slice slice
     cdef public type type
+    cdef public str orig_str
+
+    def __cinit__(self, slice slice, type type, str orig_str):
+        self.slice = slice
+        self.type = type
+        self.orig_str = orig_str
+
+    def value(self):
+        return self.orig_str[self.slice]
+
+    @staticmethod
+    def enum2type(ParserState state):
+        if state == dict_outer:
+            return dict
+        elif state == list_outer:
+            return list
+        elif state in (double_quote, single_quote):
+            return str
+        elif state in (pre_float, post_float):
+            # note: I don't think post_float can get here
+            return float
+        else:
+            raise TypeError("no type translation for ParserState", state)
 
     @classmethod
-    def parse(type class_, str string):
-        """takes a string representing a collection in json (list or dict).
-        returns (keys, values) where:
-            
-        """
+    def parse(type class_, str string, bint verbose=False):
+        "takes a string representing a collection in json (list or dict). returns ParseOutput"
         # todo: replace this with a static-allocated stack and go dynamic only when needed (and the permit_malloc flag is False)
-        cdef list stack = [top]
-        for i, char_ in enumerate(string):
+        cdef list stack = [top, begin_val]
+        output = ParseOutput()
+        citer = CharIterator(string)
+        cdef Frame outer_frame = None
+        if verbose:
+            print 'parsing %r' % string
+        for i, char_ in citer:
+            if verbose:
+                print i, char_, stack
             if not stack:
                 raise UnexpectedCase("shouldn't get here -- we should reach top state first")
             state = stack[-1]
-            if state == top and i != 0:
+            if state == top:
                 raise IncompleteParse(i, string[:i], string[i:])
-            elif state == top:
+            elif char_.isspace():
+                pass
+            elif state == begin_val:
+                stack.pop()
                 if char_ == '{':
                     stack.append(dict_outer)
-                    continue
                 elif char_ == '[':
                     stack.append(list_outer)
-                    continue
+                elif stack == [top]:
+                    raise OuterNotCollection(i, char_)
+                elif char_ == '"':
+                    stack.append(double_quote)
+                elif char_ == "'":
+                    stack.append(single_quote)
+                elif char_.isdigit():
+                    stack.append(pre_float)
                 else:
-                    raise IllegalChar("first character must be '[' or '{'")
+                    raise IllegalChar("bad first character for begin_val", i, char_)
+                if len(stack) == 3:
+                    if outer_frame is not None:
+                        raise UnexpectedCase("reusing outer frame before clearing it")
+                    outer_frame = Frame(stack[-1], i)
+            elif state == list_outer:
+                if len(stack) == 2 and outer_frame:
+                    output.values.append(JEBExtent(
+                        slice(outer_frame.startpos, i),
+                        JEBExtent.enum2type(outer_frame.state),
+                        string
+                    ))
+                    outer_frame = None
+                if char_ == ']':
+                    stack.pop()
+                elif char_ == ',':
+                    stack.append(begin_val)
+                else:
+                    # warning: I think this ends up letting spaces separate list values
+                    stack.append(begin_val)
+                    citer.rerun()
+            elif state == dict_outer:
+                if char_ == '}':
+                    stack.pop()
+                else:
+                    raise NotImplementedError
+                    stack.append(begin_val)
+                    citer.rerun()
+            elif state == pre_comma:
+                raise NotImplementedError
             elif state == dict_outer:
                 raise NotImplementedError
             elif state == list_outer:
                 #
                 raise NotImplementedError
             elif state == double_quote:
-                raise NotImplementedError
+                if char_ == '\\':
+                    stack.append(backslash)
+                elif char_ == '"':
+                    stack.pop()
+                else:
+                    pass
             elif state == single_quote:
                 raise NotImplementedError
             elif state == backslash:
@@ -103,25 +187,31 @@ cdef class JEBExtent:
             elif state == list_value:
                 if char_ == ']':
                     stack.pop()
-                    if stack[-1] != list_outer:
-                        raise UnexpectedCase("list_value not adjacent to list_outer", stack[-1])
-                    # todo: make this a rerun case
-                    stack.pop()
-                    continue
+                    citer.rerun()
                 elif char_.isspace():
-                    continue
+                    pass
                 else:
                     # todo: below here should rerun as value-start
                     raise NotImplementedError
             elif state == pre_float:
-                raise NotImplementedError
+                if char_.isdigit():
+                    pass
+                elif char_ == '.':
+                    stack[-1] = post_float
+                else:
+                    stack.pop()
+                    citer.rerun()
             elif state == post_float:
-                raise NotImplementedError
+                if char_.isdigit():
+                    pass
+                else:
+                    stack.pop()
+                    citer.rerun()
             else:
                 raise UnexpectedCase("unk ParserState value", state)
         if stack != [top]:
             raise IncompleteJson
-        raise NotImplementedError
+        return output
 
 cdef class JEBEntity:
     "base for entity types"
