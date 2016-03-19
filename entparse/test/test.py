@@ -31,3 +31,8 @@ def test_char_iterator():
             citer.rerun()
         res.append(c)
     assert res == ['a','b','b','c']
+
+    with pytest.raises(entparse.RerunError):
+        citer = entparse.CharIterator('abc')
+        for _ in citer:
+            citer.rerun()
