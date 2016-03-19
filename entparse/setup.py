@@ -18,7 +18,7 @@ ARGS = dict(
   author='Abe Winter ',
   url='https://github.com/abe-winter/entparse',
   license='MIT',
-  ext_modules=cythonize('entparse.pyx'),
+  ext_modules=cythonize('entparse.pyx', extra_compile_args=['-O3']),
   install_requires=REQS,
 )
 
