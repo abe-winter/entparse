@@ -1,3 +1,4 @@
+cimport entparse
 import json
 
 cdef enum ParserState:
@@ -56,34 +57,6 @@ cdef class Frame:
 
     cdef void clear(self):
         self.in_use = 0
-
-cdef class ParseOutput:
-    """Stores result of parse.
-    -- for a list input, keys is None
-    -- for a dict input, keys is a list of JEBExtent for the keys
-    For both, values is a list of JEBExtent representing the collection values.
-    """
-    cdef public list keys
-    cdef public list values
-
-    def __cinit__(self):
-        self.keys = []
-        self.values = []
-
-    def tolist(self):
-        "note: this succeeds even for dictionaries"
-        return [
-            json.loads(v.value())
-            for v in self.values
-        ]
-
-    def todict(self):
-        if len(self.keys) != len(self.values):
-            raise TypeError("todict() requires matched keys and values")
-        return {
-            k.value(): json.loads(v.value())
-            for k, v in zip(self.keys, self.values)
-        }
 
 cdef class CharIterator:
     """wrapper for iterating through strings with the ability to rerun a character.
@@ -172,15 +145,13 @@ cdef int isdigit(char c):
 cdef class JEBExtent:
     cdef public slice slice
     cdef public type type
-    cdef public str orig_str
 
-    def __cinit__(self, slice slice, type type, str orig_str):
+    cdef void set_(self, slice slice, type type):
         self.slice = slice
         self.type = type
-        self.orig_str = orig_str
 
-    def value(self):
-        return self.orig_str[self.slice]
+    def value(self, str orig_str):
+        return orig_str[self.slice]
 
     @staticmethod
     def enum2type(ParserState state):
@@ -196,18 +167,76 @@ cdef class JEBExtent:
         else:
             raise TypeError("no type translation for ParserState", state)
 
-    @classmethod
-    def parse(type class_, str string, bint verbose=False, maxdepth=20, maxwidth=100):
+cdef class ExtentList:
+    def __init__(self, width):
+        self.n = 0
+        self._extents = [JEBExtent() for i in range(width)]
+
+    cdef clear(self):
+        self.n = 0
+
+    def __len__(self):
+        return self.n
+
+    @property
+    def extents(self):
+        return self._extents[:self.n]
+
+    cdef push(self, slice slice, type type):
+        # todo: type should be a ParserState
+        cdef JEBExtent extent
+        if self.n < len(self._extents):
+            extent = self._extents[self.n]
+            extent.set_(slice, type)
+            self.n += 1
+        elif self.n == len(self._extents):
+            self._extents.append(JEBExtent())
+            self.push(slice, type)
+        else:
+            raise UnexpectedCase("shouldn't be possible for n to get greater than len(extents)")
+
+cdef class ParseOutput:
+    """Stores result of parse.
+    -- for a list input, keys is None
+    -- for a dict input, keys is a list of JEBExtent for the keys
+    For both, values is a list of JEBExtent representing the collection values.
+    """
+
+    def __init__(self, width=20):
+        self.keys = ExtentList(width)
+        self.values = ExtentList(width)
+
+    def tolist(self, str string):
+        "note: this succeeds even for dictionaries"
+        print self.values.extents[:self.values.n]
+        return [
+            json.loads(v.value(string))
+            for v in self.values.extents
+        ]
+
+    def todict(self, str string):
+        if len(self.keys) != len(self.values):
+            raise TypeError("todict() requires matched keys and values")
+        return {
+            k.value(string): json.loads(v.value(string))
+            for k, v in zip(self.keys.extents, self.values.extents)
+        }
+
+    cdef clear(self):
+        self.keys.clear()
+        self.values.clear()
+
+    cpdef void parse(self, str string, bint verbose):
         "takes a string representing a collection in json (list or dict). returns ParseOutput"
         # todo: replace this with a static-allocated stack and go dynamic only when needed (and the permit_malloc flag is False)
         cdef Stack stack = Stack()
         stack.push(top)
         stack.push(begin_val)
-        output = ParseOutput()
         cdef CharIterator citer = CharIterator(string)
         cdef Frame outer_frame = Frame()
         if verbose:
             print 'parsing %r' % string
+        self.clear()
         cdef unsigned int i
         cdef char char_
         while citer.looping():
@@ -245,11 +274,10 @@ cdef class JEBExtent:
                     outer_frame.set(stack.peek(), i)
             elif state == list_outer:
                 if stack.n == 2 and outer_frame.in_use:
-                    output.values.append(JEBExtent(
+                    self.values.push(
                         slice(outer_frame.startpos, i),
                         JEBExtent.enum2type(outer_frame.state),
-                        string
-                    ))
+                    )
                     outer_frame.clear()
                 if char_ == ']':
                     stack.pop()
@@ -263,11 +291,10 @@ cdef class JEBExtent:
             elif state == dict_outer:
                 if stack.n == 2 and outer_frame.in_use:
                     # todo: merge this with identical clause in list_outer
-                    output.values.append(JEBExtent(
+                    self.values.push(
                         slice(outer_frame.startpos, i),
                         JEBExtent.enum2type(outer_frame.state),
-                        string
-                    ))
+                    )
                     outer_frame.clear()
                 if char_ == '}':
                     stack.pop()
@@ -289,11 +316,10 @@ cdef class JEBExtent:
                     stack.pop()
                     if state == dict_key:
                         if stack.n == 2 and outer_frame.in_use:
-                            output.keys.append(JEBExtent(
+                            self.keys.push(
                                 slice(outer_frame.startpos, i),
                                 JEBExtent.enum2type(outer_frame.state),
-                                string
-                            ))
+                            )
                             outer_frame.clear()
                         stack.push(dict_sep)
                 else:
@@ -325,7 +351,6 @@ cdef class JEBExtent:
                 raise UnexpectedCase("unk ParserState value", state)
         if stack.n != 1 or stack.peek() != top:
             raise IncompleteJson
-        return output
 
 cdef class JEBEntity:
     "base for entity types"

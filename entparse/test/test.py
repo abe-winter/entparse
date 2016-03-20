@@ -3,12 +3,16 @@ import entparse
 
 def test_list_container():
     val = [1.1, '2', [3]]
-    assert val == entparse.JEBExtent.parse(json.dumps(val), True).tolist()
+    parser = entparse.ParseOutput()
+    parser.parse(json.dumps(val), True)
+    assert val == parser.tolist(json.dumps(val))
 
 def test_dict_container():
     # todo: make this list actually a list
     val = {'a':1, 'b':[1,2], 'c':"x"}
-    assert val == entparse.JEBExtent.parse(json.dumps(val), True).todict()
+    parser = entparse.ParseOutput()
+    parser.parse(json.dumps(val), True)
+    assert val == parser.todict(json.dumps(val))
 
 @pytest.mark.xfail
 def test_parse_unicode():
