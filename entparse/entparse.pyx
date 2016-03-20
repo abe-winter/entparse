@@ -6,6 +6,7 @@ cdef enum ParserState:
     begin_val
     top, dict_outer, list_outer, double_quote, single_quote, backslash, list_value, pre_float, post_float,
     dict_key, dict_sep
+    not_set
 
 def translate_parserstate(ParserState state):
     return {
@@ -41,10 +42,20 @@ cdef class Frame:
     ""
     cdef ParserState state
     cdef int startpos
+    cdef int in_use
 
-    def __cinit__(self, ParserState state, int startpos):
+    def __cinit__(self):
+        self.state = not_set
+        self.startpos = 0
+        self.in_use = 0
+
+    cdef void set(self, ParserState state, int startpos):
+        self.in_use = 1
         self.state = state
         self.startpos = startpos
+
+    cdef void clear(self):
+        self.in_use = 0
 
 cdef class ParseOutput:
     """Stores result of parse.
@@ -189,14 +200,12 @@ cdef class JEBExtent:
     def parse(type class_, str string, bint verbose=False, maxdepth=20, maxwidth=100):
         "takes a string representing a collection in json (list or dict). returns ParseOutput"
         # todo: replace this with a static-allocated stack and go dynamic only when needed (and the permit_malloc flag is False)
-        cdef Stack stack
-        stack = Stack()
+        cdef Stack stack = Stack()
         stack.push(top)
         stack.push(begin_val)
         output = ParseOutput()
-        cdef CharIterator citer
-        citer = CharIterator(string)
-        cdef Frame outer_frame = None
+        cdef CharIterator citer = CharIterator(string)
+        cdef Frame outer_frame = Frame()
         if verbose:
             print 'parsing %r' % string
         cdef unsigned int i
@@ -231,17 +240,17 @@ cdef class JEBExtent:
                 else:
                     raise IllegalChar("bad first character for begin_val", i, char_)
                 if stack.n == 3:
-                    if outer_frame is not None:
+                    if outer_frame.in_use:
                         raise UnexpectedCase("reusing outer_frame before clearing it")
-                    outer_frame = Frame(stack.peek(), i)
+                    outer_frame.set(stack.peek(), i)
             elif state == list_outer:
-                if stack.n == 2 and outer_frame:
+                if stack.n == 2 and outer_frame.in_use:
                     output.values.append(JEBExtent(
                         slice(outer_frame.startpos, i),
                         JEBExtent.enum2type(outer_frame.state),
                         string
                     ))
-                    outer_frame = None
+                    outer_frame.clear()
                 if char_ == ']':
                     stack.pop()
                 elif char_ == ',':
@@ -252,22 +261,22 @@ cdef class JEBExtent:
                     # todo: only allow this clause in list_beginning case
                     # raise IllegalChar("unexpected char at list scope", i, char_)
             elif state == dict_outer:
-                if stack.n == 2 and outer_frame:
+                if stack.n == 2 and outer_frame.in_use:
                     # todo: merge this with identical clause in list_outer
                     output.values.append(JEBExtent(
                         slice(outer_frame.startpos, i),
                         JEBExtent.enum2type(outer_frame.state),
                         string
                     ))
-                    outer_frame = None
+                    outer_frame.clear()
                 if char_ == '}':
                     stack.pop()
                 elif char_ == '"':
                     stack.push(dict_key)
                     if stack.n == 3:
-                        if outer_frame is not None:
+                        if outer_frame.in_use:
                             raise UnexpectedCase("reusing outer_frame before clear (in dict_key)")
-                        outer_frame = Frame(stack.peek(), i+1)
+                        outer_frame.set(stack.peek(), i+1)
                 elif char_ == ',':
                     # todo: distinguish between expecting a dict key vs comma
                     pass
@@ -279,13 +288,13 @@ cdef class JEBExtent:
                 elif char_ == '"':
                     stack.pop()
                     if state == dict_key:
-                        if stack.n == 2 and outer_frame:
+                        if stack.n == 2 and outer_frame.in_use:
                             output.keys.append(JEBExtent(
                                 slice(outer_frame.startpos, i),
                                 JEBExtent.enum2type(outer_frame.state),
                                 string
                             ))
-                            outer_frame = None
+                            outer_frame.clear()
                         stack.push(dict_sep)
                 else:
                     pass
