@@ -2,6 +2,8 @@
 
 The json entity parser. This is a cython library that can be used from python or cython to do fast parsing of json entities.
 
+Docs? Nada. But you can get started by looking in the `bench/` folder; there's a python (`benchmark.py`) and cython (`cbench.pyx`) example there.
+
 ### what's an entity?
 
 * every item you parse has the same fields or fields from a small-ish, known set
@@ -17,7 +19,8 @@ The json entity parser. This is a cython library that can be used from python or
 ### correctness issues
 
 * this doesn't validate and there are known bad strings that it will probably parse
-* not widely tested otherwise
+* not tested on comprehensive inputs
+* error handling isn't perfect; wouldn't be impossible for this to have an infinite loop or to ignore exceptions.
 
 ### how fast is this?
 
