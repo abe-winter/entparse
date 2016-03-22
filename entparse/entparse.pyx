@@ -1,13 +1,6 @@
-cimport entparse
+from libc.stdlib cimport malloc, free
 import json
-
-cdef enum ParserState:
-    # note: post_comma and pre_comma can only appear directly above a dict_outer or list_outer
-    post_comma
-    begin_val
-    top, dict_outer, list_outer, double_quote, single_quote, backslash, list_value, pre_float, post_float,
-    dict_key, dict_sep
-    not_set
+cimport entparse
 
 def translate_parserstate(ParserState state):
     return {
@@ -38,6 +31,7 @@ class RerunError(EntparseError): pass
 class OuterNotCollection(EntparseError): pass
 class EmptyStack(EntparseError): pass
 class FullStack(EntparseError): pass
+class AlreadyFreed(EntparseError): pass
 
 cdef class Frame:
     ""
@@ -142,35 +136,30 @@ cdef int isspace(char c):
 cdef int isdigit(char c):
     return c >= '0' and c <= '9'
 
-cdef class JEBExtent:
-    cdef public slice slice
-    cdef public type type
-
-    cdef void set_(self, slice slice, type type):
-        self.slice = slice
-        self.type = type
-
-    def value(self, str orig_str):
-        return orig_str[self.slice]
-
-    @staticmethod
-    def enum2type(ParserState state):
-        if state == dict_outer:
-            return dict
-        elif state == list_outer:
-            return list
-        elif state in (double_quote, single_quote, dict_key):
-            return str
-        elif state in (pre_float, post_float):
-            # note: I don't think post_float can get here
-            return float
-        else:
-            raise TypeError("no type translation for ParserState", state)
+cdef object enum2type(ParserState state):
+    if state == dict_outer:
+        return dict
+    elif state == list_outer:
+        return list
+    elif state in (double_quote, single_quote, dict_key):
+        return str
+    elif state in (pre_float, post_float):
+        # note: I don't think post_float can get here
+        return float
+    else:
+        raise TypeError("no type translation for ParserState", state)
 
 cdef class ExtentList:
-    def __init__(self, width):
+
+    def __init__(self, unsigned int width):
         self.n = 0
-        self._extents = [JEBExtent() for i in range(width)]
+        self.width = width
+        self._extents = <JEBExtent*>malloc(sizeof(JEBExtent) * width)
+
+    def __dealloc__(self):
+        free(self._extents)
+        self._extents = NULL
+
 
     cdef clear(self):
         self.n = 0
@@ -180,20 +169,26 @@ cdef class ExtentList:
 
     @property
     def extents(self):
-        return self._extents[:self.n]
-
-    cdef push(self, slice slice, type type):
-        # todo: type should be a ParserState
-        cdef JEBExtent extent
-        if self.n < len(self._extents):
-            extent = self._extents[self.n]
-            extent.set_(slice, type)
-            self.n += 1
-        elif self.n == len(self._extents):
-            self._extents.append(JEBExtent())
-            self.push(slice, type)
+        if self._extents == NULL:
+            raise AlreadyFreed
         else:
-            raise UnexpectedCase("shouldn't be possible for n to get greater than len(extents)")
+            return [self._extents[i] for i in range(self.n)]
+
+    cdef set(self, unsigned int i, unsigned int a, unsigned int b, ParserState state):
+        cdef JEBExtent* extent = &self._extents[i]
+        extent.a = a
+        extent.b = b
+        extent.type = state
+
+    cdef push(self, unsigned int a, unsigned int b, ParserState state):
+        if self.n < self.width:
+            self.set(self.n, a, b, state)
+            self.n += 1
+        else:
+            raise NotImplementedError('realloc in ExtentList')
+
+def extent_slice(JEBExtent extent, str orig_str):
+    return orig_str[extent.a:extent.b]
 
 cdef class ParseOutput:
     """Stores result of parse.
@@ -208,9 +203,8 @@ cdef class ParseOutput:
 
     def tolist(self, str string):
         "note: this succeeds even for dictionaries"
-        print self.values.extents[:self.values.n]
         return [
-            json.loads(v.value(string))
+            json.loads(extent_slice(v, string))
             for v in self.values.extents
         ]
 
@@ -218,7 +212,7 @@ cdef class ParseOutput:
         if len(self.keys) != len(self.values):
             raise TypeError("todict() requires matched keys and values")
         return {
-            k.value(string): json.loads(v.value(string))
+            extent_slice(k, string): json.loads(extent_slice(v, string))
             for k, v in zip(self.keys.extents, self.values.extents)
         }
 
@@ -274,10 +268,7 @@ cdef class ParseOutput:
                     outer_frame.set(stack.peek(), i)
             elif state == list_outer:
                 if stack.n == 2 and outer_frame.in_use:
-                    self.values.push(
-                        slice(outer_frame.startpos, i),
-                        JEBExtent.enum2type(outer_frame.state),
-                    )
+                    self.values.push(outer_frame.startpos, i, outer_frame.state)
                     outer_frame.clear()
                 if char_ == ']':
                     stack.pop()
@@ -291,10 +282,7 @@ cdef class ParseOutput:
             elif state == dict_outer:
                 if stack.n == 2 and outer_frame.in_use:
                     # todo: merge this with identical clause in list_outer
-                    self.values.push(
-                        slice(outer_frame.startpos, i),
-                        JEBExtent.enum2type(outer_frame.state),
-                    )
+                    self.values.push(outer_frame.startpos, i, outer_frame.state)
                     outer_frame.clear()
                 if char_ == '}':
                     stack.pop()
@@ -316,10 +304,7 @@ cdef class ParseOutput:
                     stack.pop()
                     if state == dict_key:
                         if stack.n == 2 and outer_frame.in_use:
-                            self.keys.push(
-                                slice(outer_frame.startpos, i),
-                                JEBExtent.enum2type(outer_frame.state),
-                            )
+                            self.keys.push(outer_frame.startpos, i, outer_frame.state)
                             outer_frame.clear()
                         stack.push(dict_sep)
                 else:
