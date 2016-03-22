@@ -16,14 +16,14 @@ cdef class ExtentList:
     cdef unsigned int width
     cdef JEBExtent* _extents
 
-    cdef clear(self)
-    cdef set(self, unsigned int i, unsigned int a, unsigned int b, ParserState state)
-    cdef push(self, unsigned int a, unsigned int b, ParserState state)
+    cdef void clear(self)
+    cdef void set(self, unsigned int i, unsigned int a, unsigned int b, ParserState state)
+    cdef void push(self, unsigned int a, unsigned int b, ParserState state)
 
 cdef class ParseOutput:
     cdef ExtentList keys
     cdef ExtentList values
 
-    cdef clear(self)
+    cdef void clear(self)
     # todo: figure out default verbose=False
     cpdef void parse(self, str string, bint verbose)

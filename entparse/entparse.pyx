@@ -120,7 +120,7 @@ cdef class Stack:
         else:
             raise EmptyStack('pop')
 
-    cdef replace(self, ParserState state):
+    cdef void replace(self, ParserState state):
         "replace stack-top element. shorthand for pop/push"
         if self.n == 0:
             raise EmptyStack('replace')
@@ -161,7 +161,7 @@ cdef class ExtentList:
         self._extents = NULL
 
 
-    cdef clear(self):
+    cdef void clear(self):
         self.n = 0
 
     def __len__(self):
@@ -174,13 +174,13 @@ cdef class ExtentList:
         else:
             return [self._extents[i] for i in range(self.n)]
 
-    cdef set(self, unsigned int i, unsigned int a, unsigned int b, ParserState state):
+    cdef void set(self, unsigned int i, unsigned int a, unsigned int b, ParserState state):
         cdef JEBExtent* extent = &self._extents[i]
         extent.a = a
         extent.b = b
         extent.type = state
 
-    cdef push(self, unsigned int a, unsigned int b, ParserState state):
+    cdef void push(self, unsigned int a, unsigned int b, ParserState state):
         if self.n < self.width:
             self.set(self.n, a, b, state)
             self.n += 1
@@ -216,7 +216,7 @@ cdef class ParseOutput:
             for k, v in zip(self.keys.extents, self.values.extents)
         }
 
-    cdef clear(self):
+    cdef void clear(self):
         self.keys.clear()
         self.values.clear()
 
@@ -336,18 +336,3 @@ cdef class ParseOutput:
                 raise UnexpectedCase("unk ParserState value", state)
         if stack.n != 1 or stack.peek() != top:
             raise IncompleteJson
-
-cdef class JEBEntity:
-    "base for entity types"
-
-cdef class JEBList(JEBEntity):
-    cdef public int maxwidth
-
-    def __getitem__(self, unsigned int index):
-        raise NotImplementedError
-
-cdef class JEBDict(JEBEntity):
-    cdef public list fields
-
-    def __getitem__(self, basestring key):
-        raise NotImplementedError
