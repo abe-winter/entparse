@@ -2,6 +2,10 @@ from libc.stdlib cimport malloc, free
 import json
 cimport entparse
 
+cdef enum FastError:
+    no_error
+    error
+
 def translate_parserstate(ParserState state):
     return {
         post_comma: 'post_comma',
@@ -19,9 +23,6 @@ def translate_parserstate(ParserState state):
         dict_sep: 'dict_sep',
     }[state]
 
-# [ list_outer post_comma ]
-# [ list_outer post_comma "a" pre_comma , post_comma ]
-
 class EntparseError(StandardError): pass
 class UnexpectedCase(EntparseError): pass
 class IncompleteParse(EntparseError): pass
@@ -32,25 +33,25 @@ class OuterNotCollection(EntparseError): pass
 class EmptyStack(EntparseError): pass
 class FullStack(EntparseError): pass
 class AlreadyFreed(EntparseError): pass
+class FastErrorException(EntparseError): pass
 
-cdef class Frame:
-    ""
-    cdef ParserState state
-    cdef int startpos
-    cdef int in_use
+cdef struct Frame:
+    ParserState state
+    int startpos
+    int in_use
 
-    def __cinit__(self):
-        self.state = not_set
-        self.startpos = 0
-        self.in_use = 0
+cdef frame_init(Frame* self):
+    self.state = not_set
+    self.startpos = 0
+    self.in_use = 0
 
-    cdef void set(self, ParserState state, int startpos):
-        self.in_use = 1
-        self.state = state
-        self.startpos = startpos
+cdef void frame_set(Frame* self, ParserState state, int startpos):
+    self.in_use = 1
+    self.state = state
+    self.startpos = startpos
 
-    cdef void clear(self):
-        self.in_use = 0
+cdef void frame_clear(Frame* self):
+    self.in_use = 0
 
 cdef class CharIterator:
     """wrapper for iterating through strings with the ability to rerun a character.
@@ -64,6 +65,8 @@ cdef class CharIterator:
     cdef const char* buf
 
     def __cinit__(self, str string):
+        # todo: next hotspot for speedup is CharIterator; make this a struct.
+        #   Also look into skipping reference-dupe for the string. Are we in nogil?
         self.nextpos = 0
         self.max_nextpos = 0 # for rerun
         self.string = string
@@ -71,13 +74,21 @@ cdef class CharIterator:
         self.buf = self.string
         self.strlen = len(self.string)
 
-    cpdef rerun(self):
+    def rerun(self):
         if self.rerun_count >= 1:
             raise RerunError('too many reruns', self.rerun_count)
         if self.nextpos == 0:
             raise RerunError("can't rerun initial")
+        self.c_rerun()
+    
+    cdef FastError c_rerun(self):
+        if self.rerun_count >= 1:
+            return error # too many reruns
+        if self.nextpos == 0:
+            return error # can't rerun initial
         self.nextpos -= 1
         self.rerun_count += 1
+        return no_error
 
     cdef int looping(self):
         return self.nextpos < self.strlen
@@ -94,41 +105,40 @@ cdef class CharIterator:
             char_ = self.nextchar()
             yield self.nextpos - 1, char_
 
-cdef class Stack:
-    cdef unsigned int n
-    cdef ParserState[20] stack
+cdef struct Stack:
+    unsigned int n
+    # todo: make this mallocable and resizable; scope it with ParseOutput
+    ParserState[20] stack
 
-    def __cinit__(self):
-        self.n = 0
+cdef void stack_init(Stack* self):
+    self.n = 0
 
-    cdef ParserState peek(self):
-        if self.n == 0:
-            raise EmptyStack('peek')
-        else:
-            return self.stack[self.n - 1]
+cdef ParserState stack_peek(Stack* self):
+    "only call this after checking empty stack"
+    return self.stack[self.n - 1]
 
-    cdef void push(self, ParserState state):
-        if self.n >= 20:
-            raise FullStack('push')
-        else:
-            self.stack[self.n] = state
-            self.n += 1
+cdef void stack_push(Stack* self, ParserState state):
+    if self.n >= 20:
+        raise FullStack('push')
+    else:
+        self.stack[self.n] = state
+        self.n += 1
 
-    cdef void pop(self):
-        if self.n > 0:
-            self.n -= 1
-        else:
-            raise EmptyStack('pop')
+cdef void stack_pop(Stack* self):
+    if self.n > 0:
+        self.n -= 1
+    else:
+        raise EmptyStack('pop')
 
-    cdef void replace(self, ParserState state):
-        "replace stack-top element. shorthand for pop/push"
-        if self.n == 0:
-            raise EmptyStack('replace')
-        self.stack[self.n - 1] = state
+cdef void stack_replace(Stack* self, ParserState state):
+    "replace stack-top element. shorthand for pop/push"
+    if self.n == 0:
+        raise EmptyStack('replace')
+    self.stack[self.n - 1] = state
 
-    def tolist(self):
-        "this is slow; only use for debugging"
-        return [translate_parserstate(self.stack[i]) for i in range(self.n)]
+cdef stack_tolist(Stack* self):
+    "this is slow; only use for debugging"
+    return [translate_parserstate(self.stack[i]) for i in range(self.n)]
 
 cdef int isspace(char c):
     return c == ' ' or c == '\t'
@@ -150,7 +160,6 @@ cdef object enum2type(ParserState state):
         raise TypeError("no type translation for ParserState", state)
 
 cdef class ExtentList:
-
     def __init__(self, unsigned int width):
         self.n = 0
         self.width = width
@@ -223,11 +232,13 @@ cdef class ParseOutput:
     cpdef void parse(self, str string, bint verbose):
         "takes a string representing a collection in json (list or dict). returns ParseOutput"
         # todo: replace this with a static-allocated stack and go dynamic only when needed (and the permit_malloc flag is False)
-        cdef Stack stack = Stack()
-        stack.push(top)
-        stack.push(begin_val)
+        cdef Stack stack
+        stack_init(&stack)
+        stack_push(&stack, top)
+        stack_push(&stack, begin_val)
         cdef CharIterator citer = CharIterator(string)
-        cdef Frame outer_frame = Frame()
+        cdef Frame outer_frame
+        frame_init(&outer_frame)
         if verbose:
             print 'parsing %r' % string
         self.clear()
@@ -238,60 +249,63 @@ cdef class ParseOutput:
             char_ = citer.nextchar()
             i = citer.nextpos - 1
             if verbose:
-                print i, chr(char_), stack.tolist()
-            if not stack:
+                print i, chr(char_), stack_tolist(&stack), outer_frame
+            if not stack.n:
                 raise UnexpectedCase("shouldn't get here -- we should reach top state first")
-            state = stack.peek()
+            state = stack_peek(&stack)
             if state == top:
                 raise IncompleteParse(i, string[:i], string[i:])
             elif isspace(char_):
                 pass
             elif state == begin_val:
-                stack.pop()
+                stack_pop(&stack)
                 if char_ == '{':
-                    stack.push(dict_outer)
+                    stack_push(&stack, dict_outer)
                 elif char_ == '[':
-                    stack.push(list_outer)
-                elif stack.n == 1 and stack.peek() == top:
+                    stack_push(&stack, list_outer)
+                elif stack.n == 1 and stack_peek(&stack) == top:
                     raise OuterNotCollection(i, char_)
                 elif char_ == '"':
-                    stack.push(double_quote)
+                    stack_push(&stack, double_quote)
                 elif char_ == "'":
-                    stack.push(single_quote)
+                    stack_push(&stack, single_quote)
                 elif isdigit(char_):
-                    stack.push(pre_float)
+                    stack_push(&stack, pre_float)
                 else:
                     raise IllegalChar("bad first character for begin_val", i, char_)
                 if stack.n == 3:
                     if outer_frame.in_use:
                         raise UnexpectedCase("reusing outer_frame before clearing it")
-                    outer_frame.set(stack.peek(), i)
+                    # todo: check stack.n before stack.peek
+                    frame_set(&outer_frame, stack_peek(&stack), i)
             elif state == list_outer:
                 if stack.n == 2 and outer_frame.in_use:
                     self.values.push(outer_frame.startpos, i, outer_frame.state)
-                    outer_frame.clear()
+                    frame_clear(&outer_frame)
                 if char_ == ']':
-                    stack.pop()
+                    stack_pop(&stack)
                 elif char_ == ',':
-                    stack.push(begin_val)
+                    stack_push(&stack, begin_val)
                 else:
-                    stack.push(begin_val)
-                    citer.rerun()
+                    stack_push(&stack, begin_val)
+                    if citer.c_rerun() != no_error:
+                        raise FastErrorException('rerun')
                     # todo: only allow this clause in list_beginning case
                     # raise IllegalChar("unexpected char at list scope", i, char_)
             elif state == dict_outer:
                 if stack.n == 2 and outer_frame.in_use:
                     # todo: merge this with identical clause in list_outer
                     self.values.push(outer_frame.startpos, i, outer_frame.state)
-                    outer_frame.clear()
+                    frame_clear(&outer_frame)
                 if char_ == '}':
-                    stack.pop()
+                    stack_pop(&stack)
                 elif char_ == '"':
-                    stack.push(dict_key)
+                    stack_push(&stack, dict_key)
                     if stack.n == 3:
                         if outer_frame.in_use:
                             raise UnexpectedCase("reusing outer_frame before clear (in dict_key)")
-                        outer_frame.set(stack.peek(), i+1)
+                        # todo: check 
+                        frame_set(&outer_frame, stack_peek(&stack), i+1)
                 elif char_ == ',':
                     # todo: distinguish between expecting a dict key vs comma
                     pass
@@ -299,14 +313,14 @@ cdef class ParseOutput:
                     raise IllegalChar("expected key or , at dict_outer scope", i, char_)
             elif state in (double_quote, dict_key):
                 if char_ == '\\':
-                    stack.push(backslash)
+                    stack_push(&stack, backslash)
                 elif char_ == '"':
-                    stack.pop()
+                    stack_pop(&stack)
                     if state == dict_key:
                         if stack.n == 2 and outer_frame.in_use:
                             self.keys.push(outer_frame.startpos, i, outer_frame.state)
-                            outer_frame.clear()
-                        stack.push(dict_sep)
+                            frame_clear(&outer_frame)
+                        stack_push(&stack, dict_sep)
                 else:
                     pass
             elif state == single_quote:
@@ -315,24 +329,26 @@ cdef class ParseOutput:
                 raise NotImplementedError
             elif state == dict_sep:
                 if char_ == ':':
-                    stack.replace(begin_val)
+                    stack_replace(&stack, begin_val)
                 else:
                     raise IllegalChar("expected ':' after key in dict scope", i, char_)
             elif state == pre_float:
                 if isdigit(char_):
                     pass
                 elif char_ == '.':
-                    stack.replace(post_float)
+                    stack_replace(&stack, post_float)
                 else:
-                    stack.pop()
-                    citer.rerun()
+                    stack_pop(&stack)
+                    if citer.c_rerun() == error:
+                        raise FastErrorException('rerun')
             elif state == post_float:
                 if isdigit(char_):
                     pass
                 else:
-                    stack.pop()
-                    citer.rerun()
+                    stack_pop(&stack)
+                    if citer.c_rerun() == error:
+                        raise FastErrorException('rerun')
             else:
                 raise UnexpectedCase("unk ParserState value", state)
-        if stack.n != 1 or stack.peek() != top:
+        if stack.n != 1 or stack_peek(&stack) != top:
             raise IncompleteJson
