@@ -2,7 +2,12 @@
 
 The json entity parser. This is a cython library that can be used from python or cython to do fast parsing of json entities.
 
-Docs? Nada. But you can get started by looking in the `bench/` folder; there's a python (`benchmark.py`) and cython (`cbench.pyx`) example there.
+Docs? Nada. But you can get started by looking at how the benchmarks are written.
+
+* [python example](bench/benchmark.py)
+* [cython example](bench/cbench.pyx)
+
+Installation instructions: follow the script in [.gitlab-ci.yml](.gitlab-ci.yml).
 
 ### what's an entity?
 
@@ -15,6 +20,7 @@ Docs? Nada. But you can get started by looking in the `bench/` folder; there's a
 
 * loading lots of json items into cython objects (cython objects for memory efficiency and initialization speed)
 * when json items have known schema
+* search of a single field in a large json file may be significantly faster than other options
 
 ### correctness issues
 
